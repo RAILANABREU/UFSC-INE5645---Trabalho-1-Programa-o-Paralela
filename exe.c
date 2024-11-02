@@ -4,111 +4,46 @@
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
-#include <sched.h>
 
-// Definição dos parâmetros, agora parametrizados
 #define NUM_ACCOUNTS 5
 #define NUM_WORKERS 4
-#define NUM_CLIENTS 2
-#define MAX_QUEUE_SIZE 100
-#define TOTAL_OPERATIONS 10
+#define NUM_CLIENTS 5
+#define MAX_QUEUE_SIZE 10
+#define TOTAL_OPERATIONS 50
 
-// Estrutura da conta bancária
 typedef struct
 {
     int id;
     double balance;
+    pthread_mutex_t mutex; // Mutex para cada conta
 } Account;
 
-// Tipos de operações
 typedef enum
 {
     SAQUE_DEPOSITO,
     TRANSFERENCIA,
     BALANCO_GERAL,
-    TERMINATE // Operação especial para sinalizar término
+    TERMINATE
 } OperationType;
 
-// Estrutura da operação
 typedef struct
 {
     OperationType type;
-    int client_id; // ID do cliente que gerou a operação
+    int client_id;
     int account_id;
-    int target_account_id; // Para transferência
+    int target_account_id;
     double amount;
 } Operation;
 
-// Implementação de um mutex personalizado (spinlock)
-typedef struct
-{
-    volatile int locked;
-} MyMutex;
-
-void my_mutex_init(MyMutex *mutex)
-{
-    mutex->locked = 0;
-}
-
-void my_mutex_lock(MyMutex *mutex)
-{
-    while (__sync_lock_test_and_set(&(mutex->locked), 1))
-    {
-        sched_yield(); // Cede a CPU para evitar busy-wait agressivo
-    }
-}
-
-void my_mutex_unlock(MyMutex *mutex)
-{
-    __sync_lock_release(&(mutex->locked));
-}
-
-// Implementação de um semáforo personalizado
-typedef struct
-{
-    int count;
-    MyMutex mutex;
-} MySemaphore;
-
-void my_semaphore_init(MySemaphore *sem, int value)
-{
-    sem->count = value;
-    my_mutex_init(&sem->mutex);
-}
-
-void my_semaphore_wait(MySemaphore *sem)
-{
-    while (1)
-    {
-        my_mutex_lock(&sem->mutex);
-        if (sem->count > 0)
-        {
-            sem->count--;
-            my_mutex_unlock(&sem->mutex);
-            break;
-        }
-        my_mutex_unlock(&sem->mutex);
-        sched_yield(); // Cede a CPU
-    }
-}
-
-void my_semaphore_signal(MySemaphore *sem)
-{
-    my_mutex_lock(&sem->mutex);
-    sem->count++;
-    my_mutex_unlock(&sem->mutex);
-}
-
-// Implementação da fila de operações como um buffer circular
 typedef struct
 {
     Operation operations[MAX_QUEUE_SIZE];
     int head;
     int tail;
     int size;
-    MyMutex mutex;
-    MySemaphore items;  // Contador de itens na fila
-    MySemaphore spaces; // Contador de espaços livres na fila
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
 } OperationQueue;
 
 void queue_init(OperationQueue *queue)
@@ -116,176 +51,285 @@ void queue_init(OperationQueue *queue)
     queue->head = 0;
     queue->tail = 0;
     queue->size = 0;
-    my_mutex_init(&queue->mutex);
-    my_semaphore_init(&queue->items, 0);               // Inicialmente sem itens
-    my_semaphore_init(&queue->spaces, MAX_QUEUE_SIZE); // Espaços disponíveis
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->not_empty, NULL);
+    pthread_cond_init(&queue->not_full, NULL);
 }
 
 void enqueue(OperationQueue *queue, Operation op)
 {
-    my_semaphore_wait(&queue->spaces); // Espera por espaço
-    my_mutex_lock(&queue->mutex);
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->size == MAX_QUEUE_SIZE)
+    {
+        pthread_cond_wait(&queue->not_full, &queue->mutex);
+    }
     queue->operations[queue->tail] = op;
     queue->tail = (queue->tail + 1) % MAX_QUEUE_SIZE;
     queue->size++;
-    my_mutex_unlock(&queue->mutex);
-    my_semaphore_signal(&queue->items); // Sinaliza que há um item disponível
+    pthread_cond_signal(&queue->not_empty);
+    pthread_mutex_unlock(&queue->mutex);
 }
 
 Operation dequeue(OperationQueue *queue)
 {
-    my_semaphore_wait(&queue->items); // Espera por item
-    my_mutex_lock(&queue->mutex);
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->size == 0)
+    {
+        pthread_cond_wait(&queue->not_empty, &queue->mutex);
+    }
     Operation op = queue->operations[queue->head];
     queue->head = (queue->head + 1) % MAX_QUEUE_SIZE;
     queue->size--;
-    my_mutex_unlock(&queue->mutex);
-    my_semaphore_signal(&queue->spaces); // Sinaliza que há espaço disponível
+    pthread_cond_signal(&queue->not_full);
+    pthread_mutex_unlock(&queue->mutex);
     return op;
 }
 
-// Variáveis globais
 Account accounts[NUM_ACCOUNTS];
 OperationQueue op_queue;
-int total_operations = 0; // Contador total de operações geradas
-MyMutex total_ops_mutex;
+int total_operations = 0;
+pthread_mutex_t total_ops_mutex;
 
-// Inicializa as contas com saldos aleatórios
+int operations_processed = 0;
+pthread_mutex_t operations_processed_mutex;
+
+int operations_since_last_balance = 0;
+pthread_mutex_t balance_mutex;
+pthread_cond_t balance_cond;
+int workers_waiting = 0;
+int processing_paused = 0;
+
 void initialize_accounts()
 {
     srand(time(NULL));
     for (int i = 0; i < NUM_ACCOUNTS; i++)
     {
         accounts[i].id = i + 1;
-        accounts[i].balance = rand() % 1000; // Saldo aleatório entre 0 e 999
+        accounts[i].balance = rand() % 1000;
+        pthread_mutex_init(&accounts[i].mutex, NULL); // Inicializa o mutex para cada conta
     }
 }
 
-// Imprime o saldo de todas as contas
 void print_accounts()
 {
     printf("\n===== Balanço Geral =====\n");
+
+    // Bloquear todos os mutexes das contas em ordem
+    for (int i = 0; i < NUM_ACCOUNTS; i++)
+    {
+        pthread_mutex_lock(&accounts[i].mutex);
+    }
+
+    // Agora é seguro ler todos os saldos
     for (int i = 0; i < NUM_ACCOUNTS; i++)
     {
         printf("Conta ID: %d, Saldo: %.2f\n", accounts[i].id, accounts[i].balance);
     }
+
+    // Desbloquear todos os mutexes das contas em ordem inversa
+    for (int i = NUM_ACCOUNTS - 1; i >= 0; i--)
+    {
+        pthread_mutex_unlock(&accounts[i].mutex);
+    }
+
     printf("=========================\n");
 }
 
-// Thread trabalhadora que processa as operações
 void *worker_thread(void *arg)
 {
     while (1)
     {
+        // Verifica se o processamento está pausado antes de prosseguir
+        pthread_mutex_lock(&balance_mutex);
+        while (processing_paused)
+        {
+            workers_waiting++;
+            if (workers_waiting == NUM_WORKERS)
+            {
+                pthread_cond_signal(&balance_cond); // Notifica o servidor que todos os trabalhadores estão esperando
+            }
+            pthread_cond_wait(&balance_cond, &balance_mutex);
+            workers_waiting--;
+        }
+        pthread_mutex_unlock(&balance_mutex);
+
+        // Dequeue da operação
         Operation op = dequeue(&op_queue);
 
-        // Verifica se é uma operação de término
         if (op.type == TERMINATE)
         {
             break;
         }
 
-        // Simula o tempo de processamento
-        sleep(1);
+        usleep(1000000); // Atraso de 1 segundo
 
-        // Processa a operação
         if (op.type == SAQUE_DEPOSITO)
         {
-            accounts[op.account_id - 1].balance += op.amount;
+            int account_index = op.account_id - 1;
+
+            // Valida o ID da conta
+            if (account_index < 0 || account_index >= NUM_ACCOUNTS)
+            {
+                fprintf(stderr, "ID de conta inválido: %d\n", op.account_id);
+                continue;
+            }
+
+            pthread_mutex_lock(&accounts[account_index].mutex);
+
+            // Verifica saldo suficiente para saque
+            if (op.amount < 0 && accounts[account_index].balance + op.amount < 0)
+            {
+                fprintf(stderr, "[Cliente %d] Saldo insuficiente para saque na conta %d\n",
+                        op.client_id, op.account_id);
+                pthread_mutex_unlock(&accounts[account_index].mutex);
+                continue;
+            }
+
+            accounts[account_index].balance += op.amount;
+            double new_balance = accounts[account_index].balance;
+            pthread_mutex_unlock(&accounts[account_index].mutex);
+
             if (op.amount >= 0)
             {
-                printf("[Cliente %d] Depósito: +%.2f na Conta %d\n", op.client_id, op.amount, op.account_id);
+                printf("[Cliente %d] Depósito: +%.2f na Conta %d, Novo saldo: %.2f\n",
+                       op.client_id, op.amount, op.account_id, new_balance);
             }
             else
             {
-                printf("[Cliente %d] Saque: %.2f da Conta %d\n", op.client_id, op.amount, op.account_id);
+                printf("[Cliente %d] Saque: %.2f da Conta %d, Novo saldo: %.2f\n",
+                       op.client_id, -op.amount, op.account_id, new_balance);
             }
         }
         else if (op.type == TRANSFERENCIA)
         {
-            accounts[op.account_id - 1].balance -= op.amount;
-            accounts[op.target_account_id - 1].balance += op.amount;
-            printf("[Cliente %d] Transferência: %.2f da Conta %d para Conta %d\n",
-                   op.client_id, op.amount, op.account_id, op.target_account_id);
+            int from_index = op.account_id - 1;
+            int to_index = op.target_account_id - 1;
+
+            // Valida os IDs das contas
+            if (from_index < 0 || from_index >= NUM_ACCOUNTS ||
+                to_index < 0 || to_index >= NUM_ACCOUNTS)
+            {
+                fprintf(stderr, "IDs de contas inválidos para transferência: %d -> %d\n",
+                        op.account_id, op.target_account_id);
+                continue;
+            }
+
+            // Tranca as contas em ordem para evitar deadlocks
+            if (from_index < to_index)
+            {
+                pthread_mutex_lock(&accounts[from_index].mutex);
+                pthread_mutex_lock(&accounts[to_index].mutex);
+            }
+            else if (from_index > to_index)
+            {
+                pthread_mutex_lock(&accounts[to_index].mutex);
+                pthread_mutex_lock(&accounts[from_index].mutex);
+            }
+            else
+            {
+                // Mesma conta
+                pthread_mutex_lock(&accounts[from_index].mutex);
+            }
+
+            // Verifica saldo suficiente
+            if (accounts[from_index].balance - op.amount < 0)
+            {
+                fprintf(stderr, "[Cliente %d] Saldo insuficiente para transferência da conta %d para a conta %d\n",
+                        op.client_id, op.account_id, op.target_account_id);
+                if (from_index != to_index)
+                {
+                    pthread_mutex_unlock(&accounts[from_index].mutex);
+                    pthread_mutex_unlock(&accounts[to_index].mutex);
+                }
+                else
+                {
+                    pthread_mutex_unlock(&accounts[from_index].mutex);
+                }
+                continue;
+            }
+
+            accounts[from_index].balance -= op.amount;
+            accounts[to_index].balance += op.amount;
+
+            double from_balance = accounts[from_index].balance;
+            double to_balance = accounts[to_index].balance;
+
+            if (from_index < to_index)
+            {
+                pthread_mutex_unlock(&accounts[to_index].mutex);
+                pthread_mutex_unlock(&accounts[from_index].mutex);
+            }
+            else if (from_index > to_index)
+            {
+                pthread_mutex_unlock(&accounts[from_index].mutex);
+                pthread_mutex_unlock(&accounts[to_index].mutex);
+            }
+            else
+            {
+                pthread_mutex_unlock(&accounts[from_index].mutex);
+            }
+
+            printf("[Cliente %d] Transferência: %.2f da Conta %d (Novo saldo: %.2f) para Conta %d (Novo saldo: %.2f)\n",
+                   op.client_id, op.amount, op.account_id, from_balance, op.target_account_id, to_balance);
         }
-        else if (op.type == BALANCO_GERAL)
-        {
-            printf("[Worker] Iniciando Balanço Geral solicitado pelo Cliente %d\n", op.client_id);
-            print_accounts();
-        }
+
+        // Incrementa operations_processed
+        pthread_mutex_lock(&operations_processed_mutex);
+        operations_processed++;
+        pthread_mutex_unlock(&operations_processed_mutex);
+
+        // Incrementa operations_since_last_balance
+        pthread_mutex_lock(&balance_mutex);
+        operations_since_last_balance++;
+        pthread_mutex_unlock(&balance_mutex);
     }
     return NULL;
 }
 
-// Thread cliente que gera operações aleatórias
 void *client_thread(void *arg)
 {
     int client_id = *((int *)arg);
-    int local_operations = 0;
 
     while (1)
     {
-        // Gera operações em intervalos aleatórios
-        usleep(500000); // 500 ms
+        usleep(100000); // Atraso de 0,1 segundo
 
-        // Cria uma nova operação
+        pthread_mutex_lock(&total_ops_mutex);
+        if (total_operations >= TOTAL_OPERATIONS)
+        {
+            pthread_mutex_unlock(&total_ops_mutex);
+            break;
+        }
+        total_operations++;
+        pthread_mutex_unlock(&total_ops_mutex);
+
         Operation op;
-        op.client_id = client_id; // Define o ID do cliente na operação
-        int op_type = rand() % 2; // 0: saqueDeposito, 1: transferencia
+        op.client_id = client_id;
+        int op_type = rand() % 2;
 
         if (op_type == 0)
         {
-            // Decide aleatoriamente entre saque e depósito
             op.type = SAQUE_DEPOSITO;
             op.account_id = rand() % NUM_ACCOUNTS + 1;
+            op.target_account_id = 0; // Não usado
             if (rand() % 2 == 0)
             {
-                // Depósito
-                op.amount = (double)(rand() % 1000);
+                op.amount = (double)(rand() % 1000 + 1); // Depósito
             }
             else
             {
-                // Saque
-                op.amount = -(double)(rand() % 500);
+                op.amount = -((double)(rand() % 500 + 1)); // Saque
             }
-            printf("[Cliente %d] Solicitou %s de %.2f na Conta %d\n", client_id,
-                   (op.amount >= 0) ? "depósito" : "saque", op.amount, op.account_id);
         }
-        else if (op_type == 1)
+        else
         {
-            // Transferência
             op.type = TRANSFERENCIA;
             op.account_id = rand() % NUM_ACCOUNTS + 1;
             op.target_account_id = rand() % NUM_ACCOUNTS + 1;
-            op.amount = (double)(rand() % 500);
-            printf("[Cliente %d] Solicitou transferência de %.2f da Conta %d para Conta %d\n",
-                   client_id, op.amount, op.account_id, op.target_account_id);
+            op.amount = (double)(rand() % 500 + 1);
         }
 
-        // Enfileira a operação
         enqueue(&op_queue, op);
-
-        local_operations++;
-
-        // Após cada 10 operações, enfileira uma operação de balanço geral
-        if (local_operations % 10 == 0)
-        {
-            Operation balanco_op;
-            balanco_op.type = BALANCO_GERAL;
-            balanco_op.client_id = client_id; // Cliente que solicitou o balanço
-            enqueue(&op_queue, balanco_op);
-            printf("[Cliente %d] Solicitou Balanço Geral\n", client_id);
-        }
-
-        // Incrementa o contador total de operações
-        my_mutex_lock(&total_ops_mutex);
-        total_operations++;
-        if (total_operations >= TOTAL_OPERATIONS)
-        {
-            my_mutex_unlock(&total_ops_mutex);
-            break;
-        }
-        my_mutex_unlock(&total_ops_mutex);
     }
     return NULL;
 }
@@ -294,13 +338,15 @@ int main()
 {
     initialize_accounts();
     queue_init(&op_queue);
-    my_mutex_init(&total_ops_mutex);
+    pthread_mutex_init(&total_ops_mutex, NULL);
+    pthread_mutex_init(&operations_processed_mutex, NULL);
+    pthread_mutex_init(&balance_mutex, NULL);
+    pthread_cond_init(&balance_cond, NULL);
 
     pthread_t workers[NUM_WORKERS];
     pthread_t clients[NUM_CLIENTS];
     int client_ids[NUM_CLIENTS];
 
-    // Cria threads trabalhadoras
     for (int i = 0; i < NUM_WORKERS; i++)
     {
         if (pthread_create(&workers[i], NULL, worker_thread, NULL) != 0)
@@ -310,7 +356,6 @@ int main()
         }
     }
 
-    // Cria threads clientes
     for (int i = 0; i < NUM_CLIENTS; i++)
     {
         client_ids[i] = i + 1;
@@ -318,6 +363,55 @@ int main()
         {
             perror("Erro ao criar thread cliente");
             exit(1);
+        }
+    }
+
+    int last_ops_processed = 0;
+
+    while (1)
+    {
+        usleep(100000); // Dorme por 0,1 segundo
+
+        pthread_mutex_lock(&operations_processed_mutex);
+        int ops_processed = operations_processed;
+        pthread_mutex_unlock(&operations_processed_mutex);
+
+        if (ops_processed >= TOTAL_OPERATIONS)
+        {
+            break;
+        }
+
+        pthread_mutex_lock(&balance_mutex);
+        if (operations_since_last_balance >= 9)
+        {
+            processing_paused = 1;
+            workers_waiting = 0;
+
+            // Notifica os trabalhadores para verificar o estado de pausa
+            pthread_mutex_unlock(&balance_mutex);
+
+            // Aguarda até que todos os trabalhadores estejam esperando
+            pthread_mutex_lock(&balance_mutex);
+            while (workers_waiting < NUM_WORKERS)
+            {
+                pthread_cond_wait(&balance_cond, &balance_mutex);
+            }
+            pthread_mutex_unlock(&balance_mutex);
+
+            // Realiza o balanço geral
+            printf("[Servidor] Realizando Balanço Geral após %d operações.\n", ops_processed);
+            print_accounts();
+
+            // Reseta o contador e retoma o processamento
+            pthread_mutex_lock(&balance_mutex);
+            operations_since_last_balance = 0;
+            processing_paused = 0;
+            pthread_cond_broadcast(&balance_cond);
+            pthread_mutex_unlock(&balance_mutex);
+        }
+        else
+        {
+            pthread_mutex_unlock(&balance_mutex);
         }
     }
 
@@ -331,7 +425,7 @@ int main()
         }
     }
 
-    // Envia sinal de término para as threads trabalhadoras
+    // Envia operações TERMINATE para as threads trabalhadoras
     for (int i = 0; i < NUM_WORKERS; i++)
     {
         Operation terminate_op;
@@ -339,7 +433,6 @@ int main()
         enqueue(&op_queue, terminate_op);
     }
 
-    // Aguarda as threads trabalhadoras terminarem
     for (int i = 0; i < NUM_WORKERS; i++)
     {
         if (pthread_join(workers[i], NULL) != 0)
@@ -350,7 +443,28 @@ int main()
     }
 
     // Imprime o balanço final
-    print_accounts();
+    printf("Balanço final:\n");
+    for (int i = 0; i < NUM_ACCOUNTS; i++)
+    {
+        pthread_mutex_lock(&accounts[i].mutex);
+        printf("Conta ID: %d, Saldo: %.2f\n", accounts[i].id, accounts[i].balance);
+        pthread_mutex_unlock(&accounts[i].mutex);
+    }
+
+    // Limpa os recursos
+    for (int i = 0; i < NUM_ACCOUNTS; i++)
+    {
+        pthread_mutex_destroy(&accounts[i].mutex);
+    }
+
+    pthread_mutex_destroy(&op_queue.mutex);
+    pthread_cond_destroy(&op_queue.not_empty);
+    pthread_cond_destroy(&op_queue.not_full);
+
+    pthread_mutex_destroy(&total_ops_mutex);
+    pthread_mutex_destroy(&operations_processed_mutex);
+    pthread_mutex_destroy(&balance_mutex);
+    pthread_cond_destroy(&balance_cond);
 
     return 0;
 }
