@@ -8,18 +8,18 @@
 
 #define NUM_ACCOUNTS 5
 #define NUM_WORKERS 4
-#define NUM_CLIENTS 1
+#define NUM_CLIENTS 2
 #define MAX_QUEUE_SIZE 10
 #define TOTAL_OPERATIONS 50
-#define LOCK_TIMEOUT 5 // Número de tentativas para o timeout do bloqueio
+#define LOCK_TIMEOUT 5
 
-int operations_processed = 0; // Nova variável para rastrear operações processadas
+int operations_processed = 0;
 
 typedef struct
 {
     int id;
     double balance;
-    pthread_mutex_t mutex; // Mutex para cada conta
+    pthread_mutex_t mutex;
 } Account;
 
 typedef enum
@@ -53,12 +53,11 @@ typedef struct
 Account accounts[NUM_ACCOUNTS];
 OperationQueue op_queue;
 int total_operations = 0;
-int operation_counter = 0; // Contador para rastrear operações
+int operation_counter = 0;
 pthread_mutex_t total_ops_mutex;
-pthread_cond_t balance_cond;   // Condição para sinalizar balanço geral
-pthread_cond_t operation_cond; // Condição para threads aguardarem durante o balanço
+pthread_cond_t balance_cond;
+pthread_cond_t operation_cond;
 
-// Função para tentar bloquear o mutex com timeout
 int try_lock_with_timeout(pthread_mutex_t *mutex)
 {
     int attempts = 0;
@@ -66,12 +65,12 @@ int try_lock_with_timeout(pthread_mutex_t *mutex)
     {
         if (pthread_mutex_trylock(mutex) == 0)
         {
-            return 0; // Sucesso no bloqueio
+            return 0;
         }
         attempts++;
         usleep(100000); // Espera 0.1 segundo antes de tentar novamente
     }
-    return -1; // Falha após o timeout
+    return -1;
 }
 
 void initialize_accounts()
@@ -81,7 +80,7 @@ void initialize_accounts()
     {
         accounts[i].id = i + 1;
         accounts[i].balance = rand() % 1000;
-        pthread_mutex_init(&accounts[i].mutex, NULL); // Inicializar mutex de cada conta
+        pthread_mutex_init(&accounts[i].mutex, NULL);
     }
 }
 
@@ -197,13 +196,11 @@ void *worker_thread(void *arg)
             }
         }
 
-        // Incrementar o contador de operações
         pthread_mutex_lock(&total_ops_mutex);
         operation_counter++;
-        operations_processed++; // Incrementa operações processadas
+        operations_processed++;
         if (operation_counter % 9 == 0 || operations_processed >= TOTAL_OPERATIONS)
         {
-            // Notificar a thread principal para exibir o balanço
             pthread_cond_signal(&balance_cond);
         }
         pthread_mutex_unlock(&total_ops_mutex);
@@ -258,7 +255,7 @@ int main()
     initialize_accounts();
     queue_init(&op_queue);
     pthread_mutex_init(&total_ops_mutex, NULL);
-    pthread_cond_init(&balance_cond, NULL); // Inicializando condição para balanço geral
+    pthread_cond_init(&balance_cond, NULL);
 
     pthread_t workers[NUM_WORKERS];
     pthread_t clients[NUM_CLIENTS];
@@ -283,7 +280,6 @@ int main()
         }
     }
 
-    // Loop da thread principal para mostrar balanço a cada 9 operações
     while (1)
     {
         pthread_mutex_lock(&total_ops_mutex);
@@ -291,15 +287,14 @@ int main()
         {
             pthread_cond_wait(&balance_cond, &total_ops_mutex);
         }
-        print_accounts();      // Mostra o balanço geral
-        operation_counter = 0; // Reseta o contador
+        print_accounts();
+        operation_counter = 0;
         pthread_mutex_unlock(&total_ops_mutex);
 
         if (operations_processed >= TOTAL_OPERATIONS)
             break;
     }
 
-    // Enviar sinal de término para threads trabalhadoras
     for (int i = 0; i < NUM_WORKERS; i++)
     {
         Operation terminate_op;
@@ -319,6 +314,6 @@ int main()
 
     pthread_mutex_destroy(&total_ops_mutex);
     pthread_cond_destroy(&balance_cond);
-    print_accounts(); // Mostra o balanço final
+    print_accounts(); // Mostrar o balanço final
     return 0;
 }

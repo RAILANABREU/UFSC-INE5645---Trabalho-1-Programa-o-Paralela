@@ -1,88 +1,165 @@
-# Universidade Federal de Santa Catarina – UFSC
-## Departamento em Informática e Estatística  
-### INE 5645 – Programação Paralela e Distribuída  
-### Semestre 2024/2  
 
----
+# Projeto: Sistema Bancário Concorrente em C
 
-## Definição do Trabalho 1: Programação Paralela
+## Principais Decisões e Estratégias de Implementação
 
-Este trabalho visa explorar o uso de padrões para programação multithread. Cada grupo irá explorar (pelo menos) os modelos de programação produtor/consumidor e pool de threads na solução do problema.
+Este projeto implementa um sistema bancário concorrente utilizando a linguagem C e programação com threads. As principais decisões e estratégias de implementação incluem:
 
----
+- **Uso de Threads**: Foram utilizadas threads para simular múltiplos clientes e trabalhadores (workers) que operam simultaneamente. Os clientes geram operações bancárias aleatórias, enquanto os trabalhadores processam essas operações.
 
-## Descrição do problema: Implementação de um servidor de contas com atendimento baseado em pool de threads
+- **Sincronização com Mutexes e Variáveis de Condição**: 
+  - Cada conta possui um mutex individual para controlar o acesso concorrente ao seu saldo, prevenindo condições de corrida.
+  - Uma fila de operações (`OperationQueue`) foi implementada utilizando mutexes e variáveis de condição para sincronizar o acesso entre produtores (clientes) e consumidores (trabalhadores).
 
-Este trabalho consiste em desenvolver um servidor multithreaded. A ideia geral é que clientes possam gerar requisições sobre contas bancárias, que serão atendidas por um servidor. Para aumentar a vazão do serviço e tirar proveito de arquiteturas com múltiplos núcleos de processamento, o servidor delega o processamento das requisições dos clientes a threads trabalhadoras.
+- **Fila de Operações com Capacidade Limitada**: A fila de operações tem um tamanho máximo definido (`MAX_QUEUE_SIZE`), o que simula uma capacidade limitada de processamento e força a sincronização entre threads produtoras e consumidoras.
 
-### Componentes do serviço bancário
+- **Timeout no Bloqueio de Mutex**: Implementação de uma função `try_lock_with_timeout` que tenta adquirir o mutex de uma conta com um número limitado de tentativas e espera entre elas. Isso evita deadlocks e threads bloqueadas indefinidamente.
 
-#### Contas bancárias
-O serviço deve manter informação sobre contas de usuários. Cada conta de usuário tem:
-- Um **identificador** (número inteiro positivo)
-- Um **saldo atual** (número real, positivo ou negativo).
+- **Tipos de Operações**:
+  - **Saque/Depósito**: Atualiza o saldo de uma conta com um valor positivo (depósito) ou negativo (saque).
+  - **Transferência**: Movimenta um valor de uma conta de origem para uma conta de destino, exigindo o bloqueio de ambos os mutexes das contas envolvidas.
+  - **Balanço Geral**: Exibição do saldo de todas as contas a cada 9 operações processadas ou quando todas as operações foram concluídas.
+  - **Terminação**: Sinaliza os trabalhadores para encerrarem suas atividades após o processamento de todas as operações.
 
-O conjunto de contas de todos os usuários pode ser armazenado em uma estrutura de dados de sua preferência (ex.: tabela hash, lista, etc.). O importante é que as operações do serviço possam acessar e atualizar essas contas.
+- **Contadores e Sinalizações**: Utilização de variáveis compartilhadas e condições para controlar o número total de operações e sincronizar a exibição do balanço geral.
 
-#### Operações
-Cada grupo deve implementar 3 operações do serviço:
+## Instruções para Compilar e Executar o Código
 
-1. **Depósito em conta corrente:**  
-   - Recebe um **identificador de conta** (inteiro positivo) e o **valor do depósito** (número real, positivo ou negativo). 
-   - Se o valor do depósito for negativo, a operação realiza um saque.
+### Pré-requisitos
 
-2. **Transferência entre contas:**  
-   - Dadas duas contas (origem e destino) e um valor de transferência, deve-se debitar o valor da conta de origem e creditar na conta de destino.
+- **Compilador GCC**: Certifique-se de ter o GCC instalado em seu sistema.
+- **Biblioteca Pthread**: Necessária para programação com threads em C.
 
-3. **Balanço geral:**  
-   - Gera uma lista com o saldo de todas as contas no momento em que a operação foi solicitada.
+### Compilação
 
-Cada operação deve conter uma função `sleep` com um valor definido para simular o tempo de processamento.
+Abra o terminal na pasta onde o código-fonte (`exe.c`) está localizado e execute o seguinte comando:
 
-#### Servidor
-- O servidor é responsável por receber as requisições dos clientes, atribuí-las às threads trabalhadoras, e periodicamente gerar um balanço geral.
-- O servidor usa um **pool de threads** para lidar com múltiplas requisições.
-- A cada 10 operações de clientes, o servidor adiciona uma operação de balanço geral na fila de requisições.
+```bash
+gcc -o exe exe.c -lpthread -lm
+```
 
-#### Threads trabalhadoras
-- O sistema disponibiliza um **pool de threads trabalhadoras**.
-- Cada thread tem dois estados: livre ou em execução.
-- As threads executam operações solicitadas pelo servidor e retornam ao estado livre após a conclusão.
+Explicação dos parâmetros:
 
-#### Clientes
-- Threads clientes geram operações (depósitos e transferências) aleatoriamente entre contas, com valores e contas escolhidos aleatoriamente.
-
----
+- `-lpthread`: Inclui a biblioteca pthread necessária para manipulação de threads POSIX. Essa biblioteca permite ao programa criar e gerenciar threads, essencial para concorrência e paralelismo em C.
+- `-o exe`: Especifica o nome do executável gerado.
+- `-lm`: Linka a biblioteca matemática necessária para algumas funções utilizadas.
 
 ### Execução
-O programa deve permitir a variação dos seguintes parâmetros:
-- Tamanho do pool de threads
-- Número de clientes
-- Taxa de geração de requisições
-- Tempo de serviço (definido pelo `sleep`)
 
-O programa pode rodar por tempo indefinido ou até que se atinja um critério de parada definido pelo grupo (por exemplo, um número de requisições atendidas ou tempo de execução).
+Após a compilação bem-sucedida, execute o programa com:
 
----
+```bash
+./exe
+```
 
-### Regras adicionais
-- O **controle de concorrência** deve ser implementado pelo grupo. Não é permitido usar estruturas de dados com exclusão mútua já implementada.
-- O **modelo produtor/consumidor** e o **pool de threads** devem ser implementados do zero pelo grupo.
+## Exemplos de Saídas com Diferentes Parametrizações
 
----
+### Parâmetros Padrão
 
-### Entrega
-A entrega do trabalho consiste em:
-1. Implementação de um programa que simule o serviço descrito.
-2. Um relatório contendo:
-   - As principais decisões e estratégias de implementação.
-   - Instruções para compilar e executar o código.
-   - Exemplos de saídas com diferentes parametrizações.
-   - Discussão sobre os resultados observados ao variar os parâmetros.
+Com os valores padrão definidos no código:
 
-O trabalho pode ser realizado em grupos de até 3 participantes e deve ser enviado pelo Moodle.
+```c
+#define NUM_ACCOUNTS 10
+#define NUM_WORKERS 5
+#define NUM_CLIENTS 10
+#define MAX_QUEUE_SIZE 10
+#define TOTAL_OPERATIONS 100
+```
 
----
+**Saída Exemplo**:
 
-### Observações
-Os nomes dos participantes devem estar no relatório enviado pelo Moodle. Participantes que não forem referenciados não serão considerados membros do grupo.
+```
+[Cliente 2] Depósito: +250.00 na Conta 5
+[Cliente 7] Saque: 100.00 da Conta 3
+[Cliente 5] Transferência: 150.00 da Conta 2 para Conta 8
+...
+
+===== Balanço Geral =====
+Conta ID: 1, Saldo: 850.00
+Conta ID: 2, Saldo: 920.00
+Conta ID: 3, Saldo: 780.00
+...
+=========================
+```
+
+### Alterando o Número de Trabalhadores
+
+Modificando o número de trabalhadores para 2:
+
+```c
+#define NUM_WORKERS 2
+```
+
+**Saída Exemplo**:
+
+Com menos trabalhadores, as operações podem se acumular na fila, e os clientes podem esperar mais tempo para adicionar novas operações.
+
+```
+[Worker] Timeout ao tentar acessar a Conta 7
+[Cliente 4] Depósito: +500.00 na Conta 2
+...
+
+===== Balanço Geral =====
+Conta ID: 1, Saldo: 650.00
+Conta ID: 2, Saldo: 1420.00
+...
+=========================
+```
+
+### Alterando o Número de Clientes
+
+Modificando o número de clientes para 5:
+
+```c
+#define NUM_CLIENTS 5
+```
+
+**Saída Exemplo**:
+
+Com menos clientes, a geração de novas operações é mais lenta, e os trabalhadores podem ficar ociosos ocasionalmente.
+
+```
+[Cliente 2] Transferência: 200.00 da Conta 3 para Conta 5
+[Cliente 5] Saque: 150.00 da Conta 1
+...
+
+===== Balanço Geral =====
+Conta ID: 1, Saldo: 700.00
+Conta ID: 2, Saldo: 950.00
+...
+=========================
+```
+
+## Discussão sobre os Resultados Obtidos ao Variar as Configurações
+
+### Impacto do Número de Trabalhadores (`NUM_WORKERS`)
+
+- **Menor Número de Trabalhadores**: Com menos threads trabalhadoras, as operações se acumulam na fila, aumentando o tempo de espera dos clientes para adicionar novas operações. Pode ocorrer timeout ao tentar acessar contas devido à competição entre as poucas threads disponíveis.
+
+- **Maior Número de Trabalhadores**: Aumentar o número de trabalhadores permite processar operações mais rapidamente. No entanto, um número muito alto pode causar overhead no sistema, devido ao gerenciamento de múltiplas threads e à possível contenção em mutexes de contas.
+
+### Impacto do Número de Clientes (`NUM_CLIENTS`)
+
+- **Menor Número de Clientes**: Com menos clientes, há uma redução na taxa de geração de novas operações. Os trabalhadores podem ficar ociosos se não houver operações suficientes na fila.
+
+- **Maior Número de Clientes**: Um número maior de clientes aumenta a concorrência para adicionar operações à fila, que pode ficar cheia (`MAX_QUEUE_SIZE`), fazendo com que os clientes esperem por espaço disponível.
+
+### Impacto do Total de Operações (`TOTAL_OPERATIONS`)
+
+- **Menor Total de Operações**: A simulação termina mais rapidamente, útil para testes rápidos ou demonstrações.
+
+- **Maior Total de Operações**: Permite uma simulação mais prolongada, testando a estabilidade e a performance do sistema em condições de carga prolongada.
+
+### Ajuste do Timeout no Bloqueio (`LOCK_TIMEOUT`)
+
+- **Menor Timeout**: Reduz o tempo que uma thread espera para bloquear uma conta, aumentando a chance de timeout e possíveis falhas ao processar uma operação.
+
+- **Maior Timeout**: As threads esperam mais tempo para adquirir um mutex, o que pode reduzir a ocorrência de timeouts, mas aumenta o tempo total de processamento de uma operação, podendo afetar a responsividade do sistema.
+
+- **Alertas de Timeout**: O sistema exibe o aviso ``` [Worker] Timeout ao tentar acessar a Conta {X} para transferência ``` quando uma thread não consegue adquirir o mutex da conta dentro do tempo limite especificado. Esse mecanismo evita deadlocks ao interromper a operação caso o bloqueio não seja possível, garantindo que o sistema continue funcionando sem que as threads fiquem presas indefinidamente esperando pelo recurso.
+
+## Participantes:
+
+- Bruno Butzke de Souza (20204857)
+- Railan Gomes de Abreu (22201641)
+- Vitor Sebajos Schweighofer (20205119)
